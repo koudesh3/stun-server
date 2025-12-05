@@ -5,11 +5,6 @@
 // 4. Writes the same bytes back
 // 5. Closes the connection
 
-// TODO: Refactor the server into a struct
-/*
-struct Server { ... }
-*/
-
 // TODO: Write unit tests
 
 // TODO: Write integration tests using TcpStream::connect()
@@ -26,56 +21,56 @@ struct Server { ... }
 
 // TODO: Handle concurrent connections (spawn thread per connection).
 
-
-
-
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::io::prelude::*; // This imports common IO traits like Read/Write
 
-
-struct TCPServer {
-
+struct TcpServer {
+    listener: TcpListener
 }
 
-// We pass in a mutable stream so the function takes ownership of the stream for its lifecycle
-// We return an io::Result<()> because this handler returns nothing except its side effects
-fn handle_client(mut stream: TcpStream) -> io::Result<()> {
+impl TcpServer {
+    fn new(host_address: &str) -> io::Result<Self> {
+        let listener = TcpListener::bind(host_address)?;
+        Ok(TcpServer { listener })
+    }
 
-    // Initialize a 1kb empty buffer
-    // This is a fixed-size stack-allocated byte array
-    let mut buffer = [0u8; 1024];
+    fn start(&self) -> io::Result<()> {
+        for stream in self.listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    self.handle_client(stream)?;
+                }
+                Err(e) => {
+                    eprintln!("Connection failed: {}", e);
+                }
+            }
+        }
+        Ok(())
+    }
 
-    // Get the remote peer address from the stream
-    let peer_addr = stream.peer_addr().unwrap();
+    fn handle_client(&self, mut stream: TcpStream) -> io::Result<()> {
+        // Initialize a 1kb empty buffer
+        // This is a fixed-size stack-allocated byte array
+        let mut buffer = [0u8; 1024];
 
-    // Load bytes from input stream into our buffer
-    // .read() returns usize
-    let bytes_received : usize = stream.read(&mut buffer)?;
-    println!("Received {} bytes from {}", bytes_received, peer_addr);
+        // Get the remote peer address from the stream
+        let peer_addr = stream.peer_addr().unwrap();
 
-    // Write the received bytes 
-    stream.write(&buffer[0..bytes_received])?;
-    println!("Sent {} bytes to {}", bytes_received, peer_addr);
+        // Load bytes from input stream into our buffer
+        let bytes_received : usize = stream.read(&mut buffer)?;
+        println!("Received {} bytes from {}", bytes_received, peer_addr);
 
-    Ok(())
+        // Write the received bytes 
+        stream.write(&buffer[0..bytes_received])?;
+        println!("Sent {} bytes to {}", bytes_received, peer_addr);
+        println!("Sent the following bytes: {:?}", &buffer[0..bytes_received]);
+
+        Ok(())
+    }
 }
 
 fn main() -> io::Result<()> {
-
-    let server = TcpListener::bind("localhost:8888")?;
-    
-    for stream in server.incoming() {
-        match stream {
-            Ok(stream) => {
-                handle_client(stream)?;
-            }
-            Err(e) => {
-                eprintln!("Connection failed: {}", e);
-            }
-        }
-        
-    }
-
-    Ok(())
+    let server = TcpServer::new("localhost:9999")?;
+    server.start()
 }

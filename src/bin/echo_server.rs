@@ -5,10 +5,6 @@
 // 4. Writes the same bytes back
 // 5. Closes the connection
 
-// TODO: Write unit tests
-
-// TODO: Write integration tests using TcpStream::connect()
-
 // TODO: What happens if the server receives over 1024 bytes? Loop until done
 
 // TODO: What happens if the server receives *way* too many bytes? Set a maximum total bytes per connection
@@ -73,4 +69,55 @@ impl TcpServer {
 fn main() -> io::Result<()> {
     let server = TcpServer::new("localhost:9999")?;
     server.start()
+}
+
+use std::thread;
+use std::time::Duration;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_server_echoes_bytes_back() {
+        // Arrange
+        let _handle = thread::spawn(|| {
+            let server = TcpServer::new("localhost:8888").unwrap();
+            server.start().unwrap();
+        });
+        
+        // Wait for the server to start in the other thread
+        thread::sleep(Duration::from_millis(10));
+
+        // Act
+        // Connect to the server
+        let mut client = TcpStream::connect("localhost:8888").unwrap();
+
+        // Create payload
+        let message = String::from("Hello, World!");
+        let byte_payload : &[u8] = message.as_bytes();
+
+        // Send payload over
+        client.write(byte_payload).unwrap();
+
+        // Wait for the server to respond in the other thread
+        thread::sleep(Duration::from_millis(100));
+
+        // Read bytes from server into a buffer
+        let mut buffer = [0u8; 1024];
+        let bytes_received : usize = client.read(&mut buffer).unwrap();
+
+        // Assert
+        assert_eq!(byte_payload, &buffer[0..bytes_received]);
+    }
+
+    // #[test]
+    // fn test_handles_message_over_1kb() {}
+
+    // #[test]
+    // fn test_rejects_message_over_size_limit() {}
+
+    // #[test]
+    // fn test_handles_connection_errors_gracefully() {}
+
 }

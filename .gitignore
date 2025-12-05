@@ -1,0 +1,25 @@
+# Build artifacts
+/target/
+
+# Rust backup files
+**/*.rs.bk
+
+# IDE and editor files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+*.swp
+*.swo
+*~
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.local
+
+# Claude Code
+.claude/

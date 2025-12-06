@@ -22,13 +22,15 @@ use std::net::{TcpListener, TcpStream};
 use std::io::prelude::*; // This imports common IO traits like Read/Write
 
 struct TcpServer {
-    listener: TcpListener
+    listener: TcpListener,
+    max_request_size: usize,
+    working_buffer_size: usize
 }
 
 impl TcpServer {
-    fn new(host_address: &str) -> io::Result<Self> {
+    fn new(host_address: &str, max_request_size: usize, working_buffer_size: usize) -> io::Result<Self> {
         let listener = TcpListener::bind(host_address)?;
-        Ok(TcpServer { listener })
+        Ok(TcpServer { listener, max_request_size, working_buffer_size })
     }
 
     fn start(&self) -> io::Result<()> {
@@ -46,21 +48,32 @@ impl TcpServer {
     }
 
     fn handle_client(&self, mut stream: TcpStream) -> io::Result<()> {
-        // Initialize a 1kb empty buffer
-        // This is a fixed-size stack-allocated byte array
-        let mut buffer = [0u8; 1024];
+        // Initialize a working buffer to read stream data into
+        let mut buffer = vec![0u8; self.working_buffer_size];
 
         // Get the remote peer address from the stream
         let peer_addr = stream.peer_addr().unwrap();
 
-        // Load bytes from input stream into our buffer
-        let bytes_received : usize = stream.read(&mut buffer)?;
-        println!("Received {} bytes from {}", bytes_received, peer_addr);
+        // Read Loop
+        loop {
+            // Track total_bytes
+            // TODO: What happens if we reach this size? Do we truncate?
+            let mut total_bytes_received : usize = 0;
 
-        // Write the received bytes 
-        stream.write(&buffer[0..bytes_received])?;
-        println!("Sent {} bytes to {}", bytes_received, peer_addr);
-        println!("Sent the following bytes: {:?}", &buffer[0..bytes_received]);
+            // Load bytes from input stream into our buffer
+            let bytes_received : usize = stream.read(&mut buffer)?;
+            println!("Received {} bytes from {}", bytes_received, peer_addr);
+            // Add these bytes to total bytes received
+
+            // Write the received bytes 
+            stream.write(&buffer[0..bytes_received])?;
+            println!("Sent {} bytes to {}", bytes_received, peer_addr);
+            println!("Sent the following bytes: {:?}", &buffer[0..bytes_received]);
+
+            // Check if there are more bytes
+
+            // If there are no more bytes, return
+        }
 
         Ok(())
     }
@@ -79,6 +92,7 @@ mod tests {
     use super::*;
 
     #[test]
+    // TODO: Update integration test after adding new fields to TcpServer struct
     fn test_server_echoes_bytes_back() {
         // Arrange
         let _handle = thread::spawn(|| {

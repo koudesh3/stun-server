@@ -78,13 +78,24 @@ impl StunMessage {
 
         while offset < end {
             // Read attribute header
-            // TODO: There is a buffer overflow risk here
+            if offset + 4 > buff.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Buffer is too short to read attribute header"
+                ));
+            }
+
             let attribute_type = u16::from_be_bytes([buff[offset], buff[offset+1]]);
-            // We must cast to usize if we want to slice buff with this value
-            // TODO: There is no bounds checking on attribute_value. This is unsafe.
             let attribute_length = u16::from_be_bytes([buff[offset+2], buff[offset+3]]) as usize;
 
-            // Read attribute
+            // Read attribute value
+            if offset + 4 + attribute_length > buff.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Buffer is too short to read attribute value"
+                ));
+            }
+
             let attribute_value = &buff[offset+4..offset+4+attribute_length];
 
             // Parse based on attribute type
@@ -139,7 +150,7 @@ impl StunMessage {
                 Vec::new()
             },
             StunMessageType::Indication => {
-                // TODO: See if indications need attributes
+                // Binding indications typically have no attributes
                 Vec::new()
             },
             StunMessageType::Success => {
@@ -238,6 +249,13 @@ impl StunMessage {
         match family {
             0x01 => {
                 // IPv4 (32 bit address)
+                if buff.len() < 8 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Buffer too short for IPv4 address"
+                    ));
+                }
+
                 let x_address = u32::from_be_bytes([buff[4], buff[5], buff[6], buff[7]]);
                 let address = x_address ^ 0x2112A442;
                 let ip = Ipv4Addr::from(address.to_be_bytes());
@@ -245,9 +263,21 @@ impl StunMessage {
             },
             0x02 => {
                 // IPv6 (128 bit address)
-                // TODO: Check if buffer is long enough, safely handle the unwrap
-                let x_address_bytes : [u8; 16] = buff[4..20].try_into().unwrap();
+                if buff.len() < 20 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Buffer too short for IPv6 address"
+                    ));
+                }
+
+
+                let x_address_bytes : [u8; 16] = buff[4..20].try_into()
+                    .map_err(|_| io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Failed to parse IPv6 address into bytes"
+                    ));
                 let x_address = u128::from_be_bytes(x_address_bytes);
+
                 // 1. Concatenate magic cookie with transaction id (u128)
                 let mut xor_key = [0u8; 16];
                 let magic_cookie : u32 = 0x2112A442;
@@ -334,8 +364,9 @@ impl StunServer {
                     })
                 },
                 StunMessageType::Indication => {
-                    // TODO: Implement this branch
-                    println!("Received indication. Path not yet implemented");
+                    // RFC 8489 Section 6.3.2: For Binding indications, no processing is required. NAT bindings are auto-refreshed on receipt.
+                    // This is a "keep alive" basically
+                    println!("Received binding indication from {}", remote_peer);
                     None
                 },
                 StunMessageType::Success => {

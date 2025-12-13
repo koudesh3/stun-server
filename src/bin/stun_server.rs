@@ -1,12 +1,14 @@
 use std::io;
 use std::net::{UdpSocket, SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
-
+// TODO: Implement rate Limiting (RateLimiter struct)
+// TODO: Reject packets that are too large
 
 struct StunServer {
     socket: UdpSocket,
     buffer_size: usize
 }
 
+#[derive(Debug, PartialEq)]
 struct StunMessage {
     message_type: StunMessageType,
     message_length: u16,
@@ -15,6 +17,7 @@ struct StunMessage {
     // username: Option<String>,
 }
 
+#[derive(Debug, PartialEq)]
 enum StunMessageType {
     Request,     // Server receives, sends Success/Error response
     Indication,  // Server receives, does NOT respond
@@ -75,8 +78,10 @@ impl StunMessage {
 
         while offset < end {
             // Read attribute header
+            // TODO: There is a buffer overflow risk here
             let attribute_type = u16::from_be_bytes([buff[offset], buff[offset+1]]);
             // We must cast to usize if we want to slice buff with this value
+            // TODO: There is no bounds checking on attribute_value. This is unsafe.
             let attribute_length = u16::from_be_bytes([buff[offset+2], buff[offset+3]]) as usize;
 
             // Read attribute
@@ -240,7 +245,7 @@ impl StunMessage {
             },
             0x02 => {
                 // IPv6 (128 bit address)
-                // TODO: Check if buffer is long enough
+                // TODO: Check if buffer is long enough, safely handle the unwrap
                 let x_address_bytes : [u8; 16] = buff[4..20].try_into().unwrap();
                 let x_address = u128::from_be_bytes(x_address_bytes);
                 // 1. Concatenate magic cookie with transaction id (u128)
@@ -289,9 +294,13 @@ impl StunServer {
     fn new(
         socket_address: &str,
         buffer_size: usize
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, SocketAddr)> {
         let udp_socket = UdpSocket::bind(socket_address)?;
-        Ok(StunServer { socket: udp_socket, buffer_size: buffer_size })
+        let local_address = udp_socket.local_addr()?;
+        Ok((
+            StunServer { socket: udp_socket, buffer_size: buffer_size },
+            local_address
+        ))
     }
 
     fn receive_packet(
@@ -305,8 +314,6 @@ impl StunServer {
     fn start(&self) -> io::Result<()> {
         // Declare a buffer to read bytes into
         let mut buffer = vec![0u8; self.buffer_size];
-
-        println!("Server listening on 0.0.0.0:8000");
 
         loop {
             println!("Waiting for packet...");
@@ -357,10 +364,141 @@ impl StunServer {
 
 fn main() -> io::Result<()> {
     // TODO: Read this as an environment variable
-    let server = StunServer::new("0.0.0.0:8000", 2048)?;
+    let (server, local_address) = StunServer::new("0.0.0.0:8000", 2048)?;
+    println!("Server listening on {}", local_address);
     server.start()
 }
 
-// TODO: Add tests
-// test_deserialize
-// test_serialize
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    // XOR an address then un-XOR it
+    fn test_xor_round_trip_ipv4() {
+        // Arrange
+        let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+        let transaction_id = [8u8; 12];
+
+        // Act
+        let x_buffer = StunMessage::construct_xor_mapped_address(socket, &transaction_id).unwrap();
+        let unxored_address = StunMessage::parse_xor_mapped_address(&x_buffer, &transaction_id).unwrap();
+
+        // Assert
+        assert_eq!(socket, unxored_address);
+    }
+
+    #[test]
+    fn test_xor_round_trip_ipv6() {
+        // Arrange
+        let socket = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)), 8080);
+        let transaction_id = [8u8; 12];
+
+        // Act
+        let x_buffer = StunMessage::construct_xor_mapped_address(socket, &transaction_id).unwrap();
+        let unxored_address = StunMessage::parse_xor_mapped_address(&x_buffer, &transaction_id).unwrap();
+
+        // Assert
+        assert_eq!(socket, unxored_address);
+    }
+    
+    #[test]
+    fn test_serialization_round_trip() {
+        // Arrange
+        let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+
+        let stun_message = StunMessage {
+            message_type: StunMessageType::Success,
+            message_length: 0,
+            transaction_id: [0u8; 12],
+            reflexive_transport_address: Some(socket),
+        };
+
+        // Act
+        let message_as_bytes = stun_message.to_bytes().unwrap();
+        let message_as_struct = StunMessage::from_bytes(&message_as_bytes).unwrap();
+
+        // Assert
+        assert_eq!(stun_message.message_type, message_as_struct.message_type);
+        assert_eq!(stun_message.transaction_id, message_as_struct.transaction_id);
+        assert_eq!(stun_message.reflexive_transport_address, message_as_struct.reflexive_transport_address);
+
+    }
+
+    #[test]
+    fn test_from_bytes_rejects_short_buffer() {
+        let short_buffer = [0u8; 10]; // Less than 20 bytes
+        let result = StunMessage::from_bytes(&short_buffer);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_bytes_rejects_invalid_magic_cookie() {
+        let mut buffer = [0u8; 20];
+        // Set wrong magic cookie
+        buffer[4..8].copy_from_slice(&0xCAFFEEEE_u32.to_be_bytes());
+        let result = StunMessage::from_bytes(&buffer);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_bytes_rejects_invalid_message_type() {
+        let mut buffer = [0u8; 20];
+        // Set most significant bits to non-zero (invalid)
+        buffer[0] = 0b11000000;
+        // Set valid magic cookie
+        buffer[4..8].copy_from_slice(&0x2112A442_u32.to_be_bytes());
+        let result = StunMessage::from_bytes(&buffer);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_server_responds_to_binding_request() {
+        use std::thread;
+        use std::sync::mpsc;
+
+        // Arrange
+        // 1. Spawn server in background thread
+        let (tx, rx) = mpsc::channel();
+
+        let _server_thread = thread::spawn(move || { // "move" transfers ownership of the transmitter
+            let (server, local_address) = StunServer::new("127.0.0.1:0", 2048).unwrap();
+            tx.send(local_address).unwrap(); // Send the local port binding to the other thread (ensuring it has started)
+            server.start().unwrap();
+        });
+
+        // 2. Wait for server to be ready
+        let server_address : SocketAddr = rx.recv().unwrap();
+
+        // 3. Create a new client socket listening to packets from the server address
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+
+        // 4. Create a STUN binding request
+        let stun_request = StunMessage {
+            message_type: StunMessageType::Request,
+            message_length: 0,
+            transaction_id: [0u8; 12],
+            reflexive_transport_address: None,
+        };
+
+        let request_bytes = stun_request.to_bytes().unwrap();
+
+        // Act
+
+        // 5. Send request to server
+        client.send_to(&request_bytes, server_address).unwrap();
+
+        // 6. Receive response from server
+        let mut response_buffer = [0u8; 2048];
+        let (bytes_received, _) = client.recv_from(&mut response_buffer).unwrap();
+
+        // 7. Parse STUN response
+        let stun_response = StunMessage::from_bytes(&response_buffer[0..bytes_received]).unwrap();
+
+        // Assert
+        assert_eq!(stun_response.message_type, StunMessageType::Success);
+        assert_eq!(stun_response.transaction_id, stun_request.transaction_id);
+        assert!(stun_response.reflexive_transport_address.is_some());
+    }
+
+}

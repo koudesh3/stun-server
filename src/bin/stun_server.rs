@@ -14,7 +14,9 @@ struct StunMessage {
     message_length: u16,
     transaction_id: [u8; 12],
     reflexive_transport_address: Option<SocketAddr>,
-    // username: Option<String>,
+    unknown_required_attributes: Vec<u16>, 
+    error_code: Option<u16>, 
+    error_reason: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -27,24 +29,22 @@ enum StunMessageType {
 
 impl StunMessage {
     fn from_bytes(buff: &[u8]) -> io::Result<StunMessage> {
-        // Parse header
+
+        // –––––––––––––––––– 1. Parse the header ––––––––––––––––––
         if buff.len() < 20 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Buffer too short to read message"));
         }
         
-        // Check most significant two bits are 00 (byte 1)
         if buff[0] & 0b11000000 != 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid STUN message"));
         }
 
         let message_type = u16::from_be_bytes([buff[0], buff[1]]);
-
         let c0 : u16 = (message_type >> 4) & 0x01;
         let c1 : u16 = (message_type >> 8) & 0x01;
         let class_bits : u16 =  (c1 << 1) | c0;
 
         // 00 request, 01 indication, 10 success, 11 error
-        // These are u16, so there are far more than 4 permutations meaning we need to use the _ catch all
         let class = match class_bits {
             0b00 => StunMessageType::Request,
             0b01 => StunMessageType::Indication,
@@ -55,26 +55,24 @@ impl StunMessage {
             }
         };
 
-        // Check message length (bytes 2 and 3)
         let message_length = u16::from_be_bytes([buff[2], buff[3]]);
 
-        // STUN Magic Cookie 🍪 0x2112A442
         let magic_cookie_bits = u32::from_be_bytes([buff[4], buff[5], buff[6], buff[7]]);
 
         if magic_cookie_bits != 0x2112A442 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid magic cookie for STUN protocol"));
         }
 
-        // Parse transaction id
         let mut transaction_id = [0u8; 12];
         transaction_id.copy_from_slice(&buff[8..20]);
 
-        // Optional properties
-        let mut reflexive_transport_address = None;  // before the loop
+        // –––––––––––––––––– 2. Parse the attributes ––––––––––––––––––
+        // note: Attributes are structured like {Type: 2 bytes, Length: 2 bytes, Value: Variable length}
+        let mut reflexive_transport_address = None;
+        let mut unknown_required_attributes = Vec::new();
 
-        // The rest is the message. It is made up of attributes, which are in the format {Type, Length, Value}. We can parse sequentially
-        let mut offset = 20; // Start after the header
-        let end = 20 + message_length as usize; // End at the header + the message length
+        let mut offset = 20; // note: header is 20 bytes
+        let end = 20 + message_length as usize;
 
         while offset < end {
             // Read attribute header
@@ -98,33 +96,50 @@ impl StunMessage {
 
             let attribute_value = &buff[offset+4..offset+4+attribute_length];
 
-            // Parse based on attribute type
-            // TODO: Implement other attribute types (ex. username, password)
+            // Parse the attribute based on its type
             match attribute_type {
                 0x0020 => {
                     reflexive_transport_address = Some(Self::parse_xor_mapped_address(attribute_value, &transaction_id)?);
                 },
-                _ => { /* Skip Unimplemented attributes */ }
+                0x0009 => {
+                    // TODO: Parse ERROR-CODE attribute
+                },
+                0x000A => {
+                    // TODO: Parse UNKNOWN-ATTRIBUTES attribute
+                }
+                _ => {
+                    // Check if the attribute_type is "comprehension required" (0x0000-0x7FFF)
+                    if attribute_type < 0x7FFF {
+                        unknown_required_attributes.push(attribute_type);
+                    }
+                    // Otherwise it's "comprehension optional" (0x8000-0xFFFF), so we can safely ignore :)
+                }
             }
 
-            // Advance the offset to the next attribute
+            // Finally, advance the offset to the next attribute
             offset += 4 + attribute_length;
             let padding = (4 - (attribute_length % 4)) % 4;
             offset += padding;
         }
 
-        Ok(StunMessage { message_type: class, message_length, transaction_id, reflexive_transport_address })
+        // –––––––––––––––––– 3. Return serialized response ––––––––––––––––––
+        Ok(StunMessage {
+            message_type: class,
+            message_length,
+            transaction_id,
+            reflexive_transport_address,
+            unknown_required_attributes,
+            // TODO: These should retrn the actual parsed error-code
+            error_code: None,
+        })
 
     }
 
-    // We return Vec<u8> instead of [u8] because [u8] is an unsized type we cannot return directly
-    // This will serialize either a success or an error
     fn to_bytes(&self) -> io::Result<Vec<u8>> {
 
         // –––––––––––––––––– 1. Construct the header ––––––––––––––––––
 
-        let method: u16 = 0x001; // Binding method
-
+        let method: u16 = 0x001; // note: The only method STUN implements is BINDING (0x001)
         let class : u16 = match self.message_type {
             StunMessageType::Request => 0b00,
             StunMessageType::Indication => 0b01,
@@ -132,8 +147,7 @@ impl StunMessage {
             StunMessageType::Error => 0b11
         };
 
-        // Class and method bits are interlaced, which requires us to do this bit shifting dance to get them in place.
-        // To understand this turn these bit masks from hex to binary and analyze which parts of the method/class bit string they align with
+        // note: Class and method bits are interlaced, which requires us to do this bit shifting dance to get them in place
         let message_type : u16 = (method & 0xf80) << 2
                                | (method & 0x0070) << 1
                                | (method & 0x000f)
@@ -150,8 +164,7 @@ impl StunMessage {
                 Vec::new()
             },
             StunMessageType::Indication => {
-                // Binding indications typically have no attributes
-                Vec::new()
+                Vec::new() // note: Binding indications require no attributes
             },
             StunMessageType::Success => {
                 if let Some(reflexive_transport_address) = self.reflexive_transport_address {
@@ -168,8 +181,24 @@ impl StunMessage {
                 }
             },
             StunMessageType::Error => {
-                // TODO: Implement error attributes
-                Vec::new()
+                if let Some(error_code) = self.error_code {
+                    let mut attributes = Vec::new();
+
+                    let error_code_attribute = Self::construct_error_code_attribute(error_code)?;
+                    attributes.extend(Self::construct_attribute(0x0009, error_code_attribute)?);
+
+                    if error_code == 420 && !self.unknown_required_attributes.is_empty() {
+                        let unknown_attributes = Self::costruct_unknown_attribute(&self.unknown_required_attributes)?;
+                        attributes.extend(Self::construct_attribute(0x00A, unknown_attributes)?);
+                    }
+
+                    attributes
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Error message must have an error code"
+                    ));
+                }
             }
         };
 
@@ -190,7 +219,14 @@ impl StunMessage {
         Ok(result)
     }
 
-    // We return Vec<u8> because the response can be variable length depending on the IP address family
+    fn construct_error_code_attribute(error_code: u16) {
+
+    }
+
+    fn construct_unknown_attribute(attributes: &Vec<u16>) {
+
+    }
+
     fn construct_xor_mapped_address(
         peer_address: SocketAddr,
         transaction_id: &[u8; 12]
@@ -205,7 +241,7 @@ impl StunMessage {
                 let x_address : u32 = address_u32 ^ 0x2112A442;
 
                 let mut result = Vec::new();
-                result.push(0x00); // Reserved byte
+                result.push(0x00); // note: This is a reserved byte
                 result.push(family);
                 result.extend_from_slice(&x_port.to_be_bytes());
                 result.extend_from_slice(&x_address.to_be_bytes());
@@ -219,6 +255,7 @@ impl StunMessage {
                 let octets = ipv6_address.octets();
                 let address_u128 = u128::from_be_bytes(octets);
 
+                // note: The magic cookie is too short to XOR an IPv6 address, so we concat with the transaction ID
                 let mut xor_key = [0u8; 16];
                 let magic_cookie : u32 = 0x2112A442;
                 xor_key[0..4].copy_from_slice(&magic_cookie.to_be_bytes());
@@ -242,13 +279,12 @@ impl StunMessage {
         buff: &[u8],
         transaction_id: &[u8; 12]
     ) -> io::Result<SocketAddr> {
-        let family = buff[1]; // 0x01 for IPv4, 0x02 for IPv6
+        let family = buff[1]; // note: Family byte is 0x01 for IPv4, 0x02 for IPv6
         let x_port = u16::from_be_bytes([buff[2], buff[3]]);
         let port = x_port ^ 0x2112;
 
         match family {
             0x01 => {
-                // IPv4 (32 bit address)
                 if buff.len() < 8 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -262,14 +298,12 @@ impl StunMessage {
                 Ok(SocketAddr::new(IpAddr::V4(ip), port))
             },
             0x02 => {
-                // IPv6 (128 bit address)
                 if buff.len() < 20 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "Buffer too short for IPv6 address"
                     ));
                 }
-
 
                 let x_address_bytes : [u8; 16] = buff[4..20].try_into()
                     .map_err(|_| io::Error::new(
@@ -278,13 +312,13 @@ impl StunMessage {
                     ));
                 let x_address = u128::from_be_bytes(x_address_bytes);
 
-                // 1. Concatenate magic cookie with transaction id (u128)
+                // note: The magic cookie is too short to XOR an IPv6 address, so we concat with the transaction ID
                 let mut xor_key = [0u8; 16];
                 let magic_cookie : u32 = 0x2112A442;
                 xor_key[0..4].copy_from_slice(&magic_cookie.to_be_bytes());
                 xor_key[4..16].copy_from_slice(transaction_id);
                 let xor_key_u128 = u128::from_be_bytes(xor_key);
-                // 2. XOR x_address with that
+                
                 let address = x_address ^ xor_key_u128;
                 let ip = Ipv6Addr::from(address.to_be_bytes());
                 Ok(SocketAddr::new(IpAddr::V6(ip), port))
@@ -295,6 +329,7 @@ impl StunMessage {
         }
     }
 
+    // note: Attributes are structured like {Type: 2 bytes, Length: 2 bytes, Value: Variable length}
     fn construct_attribute(
         attribute_type: u16,
         value: Vec<u8>
@@ -302,16 +337,10 @@ impl StunMessage {
         let length = value.len() as u16;
         let mut result = Vec::new();
 
-        // Attribute Type (2-bytes, big-endian)
         result.extend_from_slice(&attribute_type.to_be_bytes());
-
-        // Attribute Lenght (2-bytes, big-endian)
         result.extend_from_slice(&length.to_be_bytes());
-
-        // Attribute Value
         result.extend_from_slice(&value);
 
-        // Padding to 32-bit boundary
         let padding = (4 - (length % 4)) % 4;
         result.extend(vec![0u8; padding as usize]);
 
@@ -342,7 +371,6 @@ impl StunServer {
     }
 
     fn start(&self) -> io::Result<()> {
-        // Declare a buffer to read bytes into
         let mut buffer = vec![0u8; self.buffer_size];
 
         loop {
@@ -350,22 +378,41 @@ impl StunServer {
             let (bytes_received, remote_peer) = self.receive_packet(&mut buffer)?;
             println!("Received {} bytes from {}", bytes_received, remote_peer);
 
-            // Parse datagram into StunMessage
-            let request = StunMessage::from_bytes(&buffer[0..bytes_received])?;
+            let request = match StunMessage::from_bytes(&buffer[0..bytes_received]) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    println!("STUN message is malformed. Silently discarding: {}", e);
+                    continue;
+                }
+            };
 
-            // This may return a StunMessage, or return nothing for unimplemented branches
+            // note: Constructing a valid StunMessage may fail, so we wrap in Option<T>
             let response : Option<StunMessage> = match request.message_type {
                 StunMessageType::Request => {
-                    Some(StunMessage {
-                        message_type: StunMessageType::Success,
-                        message_length: request.message_length,
-                        transaction_id: request.transaction_id,
-                        reflexive_transport_address: Some(remote_peer)
-                    })
+
+                    if !request.unknown_required_attributes.is_empty() {
+                        Some(StunMessage {
+                            message_type: StunMessageType::Error,
+                            message_length: 0,
+                            transaction_id: request.transaction_id,
+                            reflexive_transport_address: Some(remote_peer),
+                            unknown_required_attributes: request.unknown_required_attributes.clone(),
+                            error_code: Some(420),
+                        })
+                    } else {
+                        Some(StunMessage {
+                            message_type: StunMessageType::Success,
+                            message_length: request.message_length,
+                            transaction_id: request.transaction_id,
+                            reflexive_transport_address: Some(remote_peer),
+                            unknown_required_attributes: Vec::new(),
+                            error_code: None,
+                        })
+                    }
+
                 },
                 StunMessageType::Indication => {
-                    // RFC 8489 Section 6.3.2: For Binding indications, no processing is required. NAT bindings are auto-refreshed on receipt.
-                    // This is a "keep alive" basically
+                    // note: No response is required for an indication. These are used as simple "keep alives" for the NAT binding
                     println!("Received binding indication from {}", remote_peer);
                     None
                 },
@@ -381,20 +428,18 @@ impl StunServer {
                 }
             };
 
-            // If the server generated a response, then send it back
             if let Some(response) = response {
                 let response_bytes = response.to_bytes()?;
                 let bytes_sent : usize = self.socket.send_to(&response_bytes, remote_peer)?;
                 println!("Echoed {} bytes to {}", bytes_sent, remote_peer);
             }
-
         }
     }
 
 }
 
 fn main() -> io::Result<()> {
-    // TODO: Read this as an environment variable
+    // TODO: When containerized, read this as an environment variable
     let (server, local_address) = StunServer::new("0.0.0.0:8000", 2048)?;
     println!("Server listening on {}", local_address);
     server.start()
@@ -405,7 +450,6 @@ mod tests {
     use super::*;
 
     #[test]
-    // XOR an address then un-XOR it
     fn test_xor_round_trip_ipv4() {
         // Arrange
         let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
@@ -443,6 +487,8 @@ mod tests {
             message_length: 0,
             transaction_id: [0u8; 12],
             reflexive_transport_address: Some(socket),
+            unknown_required_attributes: Vec::new(),
+            error_code: None,
         };
 
         // Act
@@ -458,7 +504,7 @@ mod tests {
 
     #[test]
     fn test_from_bytes_rejects_short_buffer() {
-        let short_buffer = [0u8; 10]; // Less than 20 bytes
+        let short_buffer = [0u8; 10]; // note: We need at least 20 bytes to read a header
         let result = StunMessage::from_bytes(&short_buffer);
         assert!(result.is_err());
     }
@@ -466,8 +512,7 @@ mod tests {
     #[test]
     fn test_from_bytes_rejects_invalid_magic_cookie() {
         let mut buffer = [0u8; 20];
-        // Set wrong magic cookie
-        buffer[4..8].copy_from_slice(&0xCAFFEEEE_u32.to_be_bytes());
+        buffer[4..8].copy_from_slice(&0xCAFFEEEE_u32.to_be_bytes()); // note: This is the wrong cookie 🍪
         let result = StunMessage::from_bytes(&buffer);
         assert!(result.is_err());
     }
@@ -475,9 +520,8 @@ mod tests {
     #[test]
     fn test_from_bytes_rejects_invalid_message_type() {
         let mut buffer = [0u8; 20];
-        // Set most significant bits to non-zero (invalid)
+        // note: Here we're setting the most significant 2 bits to non-zero (error condition) with a valid cookie
         buffer[0] = 0b11000000;
-        // Set valid magic cookie
         buffer[4..8].copy_from_slice(&0x2112A442_u32.to_be_bytes());
         let result = StunMessage::from_bytes(&buffer);
         assert!(result.is_err());
@@ -489,41 +533,43 @@ mod tests {
         use std::sync::mpsc;
 
         // Arrange
-        // 1. Spawn server in background thread
+        // –––––––––––––––––– 1. Spawn server in bg and wait for it to be ready ––––––––––––––––––
+        // note: To ensure that the server has successfully started before we start sending requests, we use a channel instead of the hacky 'sleep'
         let (tx, rx) = mpsc::channel();
 
-        let _server_thread = thread::spawn(move || { // "move" transfers ownership of the transmitter
+        let _server_thread = thread::spawn(move || { // note: 'move' transfers ownership of the transmitter to the created thread
             let (server, local_address) = StunServer::new("127.0.0.1:0", 2048).unwrap();
-            tx.send(local_address).unwrap(); // Send the local port binding to the other thread (ensuring it has started)
+            tx.send(local_address).unwrap();
             server.start().unwrap();
         });
 
-        // 2. Wait for server to be ready
         let server_address : SocketAddr = rx.recv().unwrap();
 
-        // 3. Create a new client socket listening to packets from the server address
+        // –––––––––––––––––– 2. Create client socket listener ––––––––––––––––––
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
 
-        // 4. Create a STUN binding request
+        // –––––––––––––––––– 3. Create a STUN binding request ––––––––––––––––––
         let stun_request = StunMessage {
             message_type: StunMessageType::Request,
             message_length: 0,
             transaction_id: [0u8; 12],
             reflexive_transport_address: None,
+            unknown_required_attributes: Vec::new(),
+            error_code: None,
         };
 
         let request_bytes = stun_request.to_bytes().unwrap();
 
         // Act
 
-        // 5. Send request to server
+        // –––––––––––––––––– 4. Send request to server ––––––––––––––––––
         client.send_to(&request_bytes, server_address).unwrap();
 
-        // 6. Receive response from server
+        // –––––––––––––––––– 5. Receive response from server ––––––––––––––––––
         let mut response_buffer = [0u8; 2048];
         let (bytes_received, _) = client.recv_from(&mut response_buffer).unwrap();
 
-        // 7. Parse STUN response
+        // –––––––––––––––––– 6. Parse STUN response ––––––––––––––––––
         let stun_response = StunMessage::from_bytes(&response_buffer[0..bytes_received]).unwrap();
 
         // Assert

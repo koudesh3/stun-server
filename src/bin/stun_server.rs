@@ -106,7 +106,10 @@ impl StunMessage {
                 },
                 0x000A => {
                     // TODO: Parse UNKNOWN-ATTRIBUTES attribute
-                }
+                },
+                0x0003 => {
+                    // CHANGE-REQUEST - legacy attribute from RFC 3489, ignore it
+                },
                 _ => {
                     // Check if the attribute_type is "comprehension required" (0x0000-0x7FFF)
                     if attribute_type < 0x7FFF {
@@ -131,6 +134,7 @@ impl StunMessage {
             unknown_required_attributes,
             // TODO: These should retrn the actual parsed error-code
             error_code: None,
+            error_reason: None,
         })
 
     }
@@ -185,11 +189,11 @@ impl StunMessage {
                     let mut attributes = Vec::new();
 
                     let error_code_attribute = Self::construct_error_code_attribute(error_code)?;
-                    attributes.extend(Self::construct_attribute(0x0009, error_code_attribute)?);
+                    attributes.extend(Self::construct_attribute(0x0009, error_code_attribute));
 
                     if error_code == 420 && !self.unknown_required_attributes.is_empty() {
-                        let unknown_attributes = Self::costruct_unknown_attribute(&self.unknown_required_attributes)?;
-                        attributes.extend(Self::construct_attribute(0x00A, unknown_attributes)?);
+                        let unknown_attributes = Self::construct_unknown_attribute(&self.unknown_required_attributes)?;
+                        attributes.extend(Self::construct_attribute(0x000A, unknown_attributes));
                     }
 
                     attributes
@@ -219,12 +223,49 @@ impl StunMessage {
         Ok(result)
     }
 
-    fn construct_error_code_attribute(error_code: u16) {
+    fn construct_error_code_attribute(error_code: u16) -> io::Result<Vec<u8>> {
+        // note: We extract codes like 420 into 4 and 20 this way.
+        let class = (error_code / 100) as u8;
+        let number = (error_code % 100) as u8;
 
+        if class < 3 || class > 6 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Error class must be between 3 and 6"
+            ));
+        }
+
+        // note: The format is rrrr rrrr rrrr rrrr rrrr rccc nnnn nnnn
+        let value : u32 = ((class as u32) << 8) | (number as u32);
+
+        let mut result = Vec::new();
+        result.extend_from_slice(&value.to_be_bytes());
+
+        let reason = match error_code {
+            300 => "Try Alternate",
+            400 => "Bad Request",
+            401 => "Unauthenticated",
+            420 => "Unknown Attribute",
+            438 => "Stale Nonce",
+            500 => "Server Error",
+            _ => "Unknown error"
+        };
+
+        // note: This is how we turn strings into UTF-8 encoding
+        result.extend_from_slice(reason.as_bytes());
+
+        Ok(result)
     }
 
-    fn construct_unknown_attribute(attributes: &Vec<u16>) {
+    fn construct_unknown_attribute(attributes: &Vec<u16>) -> io::Result<Vec<u8>> {
 
+        let mut result = Vec::new();
+
+        for attribute_type in attributes {
+            result.extend_from_slice(&attribute_type.to_be_bytes());
+        }
+
+        Ok(result)
     }
 
     fn construct_xor_mapped_address(
@@ -309,7 +350,7 @@ impl StunMessage {
                     .map_err(|_| io::Error::new(
                         io::ErrorKind::InvalidData,
                         "Failed to parse IPv6 address into bytes"
-                    ));
+                    ))?;
                 let x_address = u128::from_be_bytes(x_address_bytes);
 
                 // note: The magic cookie is too short to XOR an IPv6 address, so we concat with the transaction ID
@@ -379,7 +420,11 @@ impl StunServer {
             println!("Received {} bytes from {}", bytes_received, remote_peer);
 
             let request = match StunMessage::from_bytes(&buffer[0..bytes_received]) {
-                Ok(msg) => msg,
+                    Ok(msg) => {
+                        println!("Parsed message type: {:?}", msg.message_type);
+                        println!("Unknown required attributes: {:?}", msg.unknown_required_attributes);  // Add this
+                        msg
+                    },
                 Err(e) => {
                     println!("STUN message is malformed. Silently discarding: {}", e);
                     continue;
@@ -398,6 +443,7 @@ impl StunServer {
                             reflexive_transport_address: Some(remote_peer),
                             unknown_required_attributes: request.unknown_required_attributes.clone(),
                             error_code: Some(420),
+                            error_reason: Some("Unknown Attribute".to_string()),
                         })
                     } else {
                         Some(StunMessage {
@@ -407,6 +453,7 @@ impl StunServer {
                             reflexive_transport_address: Some(remote_peer),
                             unknown_required_attributes: Vec::new(),
                             error_code: None,
+                            error_reason: None,
                         })
                     }
 
@@ -429,6 +476,7 @@ impl StunServer {
             };
 
             if let Some(response) = response {
+                println!("Sending response type: {:?}", response.message_type);  // Add this
                 let response_bytes = response.to_bytes()?;
                 let bytes_sent : usize = self.socket.send_to(&response_bytes, remote_peer)?;
                 println!("Echoed {} bytes to {}", bytes_sent, remote_peer);
@@ -489,6 +537,7 @@ mod tests {
             reflexive_transport_address: Some(socket),
             unknown_required_attributes: Vec::new(),
             error_code: None,
+            error_reason: None,
         };
 
         // Act
@@ -556,6 +605,7 @@ mod tests {
             reflexive_transport_address: None,
             unknown_required_attributes: Vec::new(),
             error_code: None,
+            error_reason: None,
         };
 
         let request_bytes = stun_request.to_bytes().unwrap();

@@ -14,7 +14,7 @@ struct StunMessage {
     message_length: u16,
     transaction_id: [u8; 12],
     reflexive_transport_address: Option<SocketAddr>,
-    unknown_required_attributes: Vec<u16>, 
+    unknown_attributes: Vec<u16>, 
     error_code: Option<u16>, 
     error_reason: Option<String>,
 }
@@ -81,7 +81,7 @@ impl StunMessage {
         // –––––––––––––––––– 2. Parse the attributes ––––––––––––––––––
         // note: Attributes are structured like {Type: 2 bytes, Length: 2 bytes, Value: Variable length}
         let mut reflexive_transport_address = None;
-        let mut unknown_required_attributes = Vec::new();
+        let mut unknown_attributes = Vec::new();
         let mut error_code = None;
         let mut error_reason = None;
 
@@ -121,7 +121,8 @@ impl StunMessage {
                     error_reason = Some(reason);
                 },
                 0x000A => {
-                    // TODO: Parse UNKNOWN-ATTRIBUTES attribute
+                    let attributes = Self::parse_unknown_attributes(attribute_value)?;
+                    unknown_attributes = attributes;
                 },
                 0x0003 => {
                     // CHANGE-REQUEST - legacy attribute from RFC 3489, ignore it
@@ -129,7 +130,7 @@ impl StunMessage {
                 _ => {
                     // Check if the attribute_type is "comprehension required" (0x0000-0x7FFF)
                     if attribute_type < 0x7FFF {
-                        unknown_required_attributes.push(attribute_type);
+                        unknown_attributes.push(attribute_type);
                     }
                     // Otherwise it's "comprehension optional" (0x8000-0xFFFF), so we can safely ignore :)
                 }
@@ -147,7 +148,7 @@ impl StunMessage {
             message_length,
             transaction_id,
             reflexive_transport_address,
-            unknown_required_attributes,
+            unknown_attributes,
             error_code,
             error_reason,
         })
@@ -206,8 +207,8 @@ impl StunMessage {
                     let error_code_attribute = Self::construct_error_code_attribute(error_code)?;
                     attributes.extend(Self::construct_attribute(0x0009, error_code_attribute));
 
-                    if error_code == 420 && !self.unknown_required_attributes.is_empty() {
-                        let unknown_attributes = Self::construct_unknown_attribute(&self.unknown_required_attributes)?;
+                    if error_code == 420 && !self.unknown_attributes.is_empty() {
+                        let unknown_attributes = Self::construct_unknown_attribute(&self.unknown_attributes)?;
                         attributes.extend(Self::construct_attribute(0x000A, unknown_attributes));
                     }
 
@@ -281,6 +282,25 @@ impl StunMessage {
         }
 
         Ok(result)
+    }
+
+    fn parse_unknown_attributes(buff: &[u8]) -> io::Result<Vec<u16>> {
+
+        let mut unknown_attributes = Vec::new();
+
+        if buff.len() % 2 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unknown attribute array is malformed"
+            ));
+        }
+
+        for i in (0..buff.len()).step_by(2) {
+            let attribute = u16::from_be_bytes([buff[i], buff[i+1]]);
+            unknown_attributes.push(attribute);
+        }
+
+        Ok(unknown_attributes)
     }
 
     fn construct_xor_mapped_address(
@@ -458,7 +478,7 @@ impl StunServer {
             let request = match StunMessage::from_bytes(&buffer[0..bytes_received]) {
                     Ok(msg) => {
                         println!("Parsed message type: {:?}", msg.message_type);
-                        println!("Unknown required attributes: {:?}", msg.unknown_required_attributes);
+                        println!("Unknown required attributes: {:?}", msg.unknown_attributes);
                         msg
                     },
                 Err(e) => {
@@ -471,13 +491,13 @@ impl StunServer {
             let response : Option<StunMessage> = match request.message_type {
                 StunMessageType::Request => {
 
-                    if !request.unknown_required_attributes.is_empty() {
+                    if !request.unknown_attributes.is_empty() {
                         Some(StunMessage {
                             message_type: StunMessageType::Error,
                             message_length: 0,
                             transaction_id: request.transaction_id,
                             reflexive_transport_address: Some(remote_peer),
-                            unknown_required_attributes: request.unknown_required_attributes.clone(),
+                            unknown_attributes: request.unknown_attributes.clone(),
                             error_code: Some(420),
                             error_reason: Some("Unknown Attribute".to_string()),
                         })
@@ -487,7 +507,7 @@ impl StunServer {
                             message_length: request.message_length,
                             transaction_id: request.transaction_id,
                             reflexive_transport_address: Some(remote_peer),
-                            unknown_required_attributes: Vec::new(),
+                            unknown_attributes: Vec::new(),
                             error_code: None,
                             error_reason: None,
                         })
@@ -571,7 +591,7 @@ mod tests {
             message_length: 0,
             transaction_id: [0u8; 12],
             reflexive_transport_address: Some(socket),
-            unknown_required_attributes: Vec::new(),
+            unknown_attributes: Vec::new(),
             error_code: None,
             error_reason: None,
         };
@@ -639,7 +659,7 @@ mod tests {
             message_length: 0,
             transaction_id: [0u8; 12],
             reflexive_transport_address: None,
-            unknown_required_attributes: Vec::new(),
+            unknown_attributes: Vec::new(),
             error_code: None,
             error_reason: None,
         };

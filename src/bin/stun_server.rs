@@ -32,11 +32,17 @@ impl StunMessage {
 
         // –––––––––––––––––– 1. Parse the header ––––––––––––––––––
         if buff.len() < 20 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Buffer too short to read message"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Buffer too short to read message"
+            ));
         }
         
         if buff[0] & 0b11000000 != 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid STUN message"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid STUN message"
+            ));
         }
 
         let message_type = u16::from_be_bytes([buff[0], buff[1]]);
@@ -51,7 +57,10 @@ impl StunMessage {
             0b10 => StunMessageType::Success,
             0b11 => StunMessageType::Error,
             _ => {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid STUN message"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid STUN message"
+                ));
             }
         };
 
@@ -60,7 +69,10 @@ impl StunMessage {
         let magic_cookie_bits = u32::from_be_bytes([buff[4], buff[5], buff[6], buff[7]]);
 
         if magic_cookie_bits != 0x2112A442 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid magic cookie for STUN protocol"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid magic cookie for STUN protocol"
+            ));
         }
 
         let mut transaction_id = [0u8; 12];
@@ -70,6 +82,8 @@ impl StunMessage {
         // note: Attributes are structured like {Type: 2 bytes, Length: 2 bytes, Value: Variable length}
         let mut reflexive_transport_address = None;
         let mut unknown_required_attributes = Vec::new();
+        let mut error_code = None;
+        let mut error_reason = None;
 
         let mut offset = 20; // note: header is 20 bytes
         let end = 20 + message_length as usize;
@@ -102,7 +116,9 @@ impl StunMessage {
                     reflexive_transport_address = Some(Self::parse_xor_mapped_address(attribute_value, &transaction_id)?);
                 },
                 0x0009 => {
-                    // TODO: Parse ERROR-CODE attribute
+                    let (code, reason) = Self::parse_error_code(attribute_value)?;
+                    error_code = Some(code);
+                    error_reason = Some(reason);
                 },
                 0x000A => {
                     // TODO: Parse UNKNOWN-ATTRIBUTES attribute
@@ -132,9 +148,8 @@ impl StunMessage {
             transaction_id,
             reflexive_transport_address,
             unknown_required_attributes,
-            // TODO: These should retrn the actual parsed error-code
-            error_code: None,
-            error_reason: None,
+            error_code,
+            error_reason,
         })
 
     }
@@ -365,9 +380,30 @@ impl StunMessage {
                 Ok(SocketAddr::new(IpAddr::V6(ip), port))
             },
             _ => {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid Address Family"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid Address Family"
+                ));
             }
         }
+    }
+
+    // Is that the right tuple return type
+    fn parse_error_code(buff: &[u8]) -> io::Result<(u16, String)> {
+        // note: The format is rrrr rrrr rrrr rrrr rrrr rccc nnnn nnnn   
+        let value = u16::from_be_bytes([buff[2], buff[3]]);
+
+        let class = value >> 8 & 0x07;
+        let number = value & 0xFF;
+
+        let error_code = class * 100 + number;
+        let error_reason = String::from_utf8(buff[4..].to_vec())
+            .map_err(|_| io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Failed to parse error reason into bytes"
+            ))?;
+        
+        Ok((error_code, error_reason))
     }
 
     // note: Attributes are structured like {Type: 2 bytes, Length: 2 bytes, Value: Variable length}
@@ -422,7 +458,7 @@ impl StunServer {
             let request = match StunMessage::from_bytes(&buffer[0..bytes_received]) {
                     Ok(msg) => {
                         println!("Parsed message type: {:?}", msg.message_type);
-                        println!("Unknown required attributes: {:?}", msg.unknown_required_attributes);  // Add this
+                        println!("Unknown required attributes: {:?}", msg.unknown_required_attributes);
                         msg
                     },
                 Err(e) => {
@@ -476,7 +512,7 @@ impl StunServer {
             };
 
             if let Some(response) = response {
-                println!("Sending response type: {:?}", response.message_type);  // Add this
+                println!("Sending response type: {:?}", response.message_type);
                 let response_bytes = response.to_bytes()?;
                 let bytes_sent : usize = self.socket.send_to(&response_bytes, remote_peer)?;
                 println!("Echoed {} bytes to {}", bytes_sent, remote_peer);

@@ -25,7 +25,7 @@ make start
 make stop
 ```
 
-To test, install a stunclient like `stuntman`
+To test, install a STUN client like `stuntman`.
 
 ```bash
 brew install stuntman

@@ -8,6 +8,9 @@ struct StunServer {
     buffer_size: usize
 }
 
+// TODO: Implement StunClient struct for use in tests
+// struct StunClient {}
+
 #[derive(Debug, PartialEq)]
 struct StunMessage {
     message_type: StunMessageType,
@@ -28,6 +31,10 @@ enum StunMessageType {
 }
 
 impl StunMessage {
+
+    // TODO: Implement new_request() and new_indication() so this struct can be used for a STUN client
+    // This would generate a cryptographically random transaction_id and otherwise initialize an empty message
+
     fn from_bytes(buff: &[u8]) -> io::Result<StunMessage> {
 
         // –––––––––––––––––– 1. Parse the header ––––––––––––––––––
@@ -125,14 +132,15 @@ impl StunMessage {
                     unknown_attributes = attributes;
                 },
                 0x0003 => {
-                    // CHANGE-REQUEST - legacy attribute from RFC 3489, ignore it
+                    // note: CHANGE-REQUEST (0x0003) is a legacy attribute from RFC 3489, we can ignore it
                 },
                 _ => {
-                    // Check if the attribute_type is "comprehension required" (0x0000-0x7FFF)
-                    if attribute_type < 0x7FFF {
+                    // note: In this range, attribute_type is "comprehension required" (0x0000-0x7FFF)
+                    //       otherwise it's "comprehension optional" (0x8000-0xFFFF), so we can safely ignore :)
+                    if attribute_type <= 0x7FFF {
                         unknown_attributes.push(attribute_type);
                     }
-                    // Otherwise it's "comprehension optional" (0x8000-0xFFFF), so we can safely ignore :)
+                    
                 }
             }
 
@@ -159,7 +167,8 @@ impl StunMessage {
 
         // –––––––––––––––––– 1. Construct the header ––––––––––––––––––
 
-        let method: u16 = 0x001; // note: The only method STUN implements is BINDING (0x001)
+        // note: The only method STUN implements is BINDING (0x001)
+        let method: u16 = 0x001;
         let class : u16 = match self.message_type {
             StunMessageType::Request => 0b00,
             StunMessageType::Indication => 0b01,
@@ -408,8 +417,15 @@ impl StunMessage {
         }
     }
 
-    // Is that the right tuple return type
     fn parse_error_code(buff: &[u8]) -> io::Result<(u16, String)> {
+        
+        if buff.len() < 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Attribute is too short to contain valid error code"
+            ));
+        }
+        
         // note: The format is rrrr rrrr rrrr rrrr rrrr rccc nnnn nnnn   
         let value = u16::from_be_bytes([buff[2], buff[3]]);
 
@@ -504,7 +520,7 @@ impl StunServer {
                     } else {
                         Some(StunMessage {
                             message_type: StunMessageType::Success,
-                            message_length: request.message_length,
+                            message_length: 0, // note: This is constructed on serialization
                             transaction_id: request.transaction_id,
                             reflexive_transport_address: Some(remote_peer),
                             unknown_attributes: Vec::new(),
@@ -519,14 +535,9 @@ impl StunServer {
                     println!("Received binding indication from {}", remote_peer);
                     None
                 },
-                StunMessageType::Success => {
-                    // TODO: Implement this branch
-                    println!("Received Success. Path not yet implemented");
-                    None
-                },
-                StunMessageType::Error => {
-                    // TODO: Implement this branch
-                    println!("Received Error. Path not yet implemented");
+                StunMessageType::Success | StunMessageType::Error => {
+                    // note: It isn't realistic for a STUN client to send a "success" or "error" to the server.
+                    println!("Received unexpected response from client");
                     None
                 }
             };

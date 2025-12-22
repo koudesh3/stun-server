@@ -554,8 +554,17 @@ impl StunServer {
 }
 
 fn main() -> io::Result<()> {
-    // TODO: When containerized, read this as an environment variable
-    let (server, local_address) = StunServer::new("0.0.0.0:8000", 2048)?;
+    let bind_address = std::env::var("STUN_BIND_ADDRESS")
+        .ok()
+        .unwrap_or_else(|| "0.0.0.0:3478".to_string());
+
+    let buffer_size = std::env::var("STUN_BUFFER_SIZE")
+        .ok()
+        .and_then(|s| (s.parse()).ok())
+        .unwrap_or(2048);
+
+    let (server, local_address) = StunServer::new(&bind_address, buffer_size)?;
+
     println!("Server listening on {}", local_address);
     server.start()
 }
@@ -694,5 +703,8 @@ mod tests {
         assert_eq!(stun_response.transaction_id, stun_request.transaction_id);
         assert!(stun_response.reflexive_transport_address.is_some());
     }
+
+    #[test]
+    fn test_server_returns_420_for_unknown_attribute() {}
 
 }

@@ -1,11 +1,94 @@
 use std::io;
 use std::net::{UdpSocket, SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
-// TODO: Implement rate Limiting (RateLimiter struct)
+use std::time::Instant;
+use std::collections::HashMap;
 // TODO: Reject packets that are too large
+
+struct Bucket {
+    level: f64,
+    last_updated: Instant,
+}
+
+impl Bucket {
+    fn new() -> Self {
+        Bucket {
+            level: 0.0,
+            last_updated: Instant::now(),
+        }
+    }
+
+    fn leak(&mut self, leak_rate: f64) {
+        let now = Instant::now();
+        let seconds_elapsed = now.duration_since(self.last_updated).as_secs_f64();
+        self.level = (self.level - seconds_elapsed * leak_rate).max(0.0);
+        self.last_updated = now;
+    }
+
+    fn can_increment(&self, capacity: f64) -> bool {
+        self.level + 1.0 <= capacity
+    }
+
+    fn increment(&mut self) {
+        self.level += 1.0;
+    }
+}
+
+struct RateLimiter {
+    bucket_map: HashMap<IpAddr, Bucket>,
+    capacity: f64,
+    leak_rate: f64,
+    last_cleanup: Instant,
+}
+
+impl RateLimiter {
+    fn new(capacity: f64, leak_rate: f64) -> Self {
+        RateLimiter {
+            bucket_map: HashMap::new(),
+            capacity,
+            leak_rate,
+            last_cleanup: Instant::now(),
+        }
+    }
+
+    fn check_and_update(&mut self, ip: IpAddr) -> bool {
+        // note: This fetches the bucket with the corresponding IP, or creates one if it doesn't exist
+        let bucket = self.bucket_map.entry(ip).or_insert_with(Bucket::new);
+        bucket.leak(self.leak_rate);
+
+        if bucket.can_increment(self.capacity) {
+            bucket.increment();
+            true
+        } else {
+            // TODO: Log error or return 429?
+            false
+        }
+    }
+
+    fn cleanup_stale_buckets(&mut self, expiration_secs: u64) {
+        let now = Instant::now();
+        // note: This filters the bucket in place, and takes a closure of form k,v. Since we're filtering on the bucket (not IP), we use |_, v|
+        self.bucket_map.retain(|_, bucket| {
+            let seconds_elapsed = now.duration_since(bucket.last_updated).as_secs();
+            // note: If the bucket is non-empty and has not been updated in x seconds, filter it out of the hash map
+            !(bucket.level == 0.0 && seconds_elapsed > expiration_secs)
+        });
+        self.last_cleanup = now;
+    }
+
+    fn should_cleanup(&self, cleanup_interval_secs: u64) -> bool {
+        Instant::now().duration_since(self.last_cleanup).as_secs() > cleanup_interval_secs
+    }
+
+    fn len(&self) -> usize {
+        self.bucket_map.len()
+    }
+
+}
 
 struct StunServer {
     socket: UdpSocket,
-    buffer_size: usize
+    buffer_size: usize,
+    // TODO: Add RateLimiter instance to track request rates per IP
 }
 
 // TODO: Implement StunClient struct for use in tests
@@ -463,12 +546,14 @@ impl StunMessage {
 
 impl StunServer {
 
+    // TODO: Accept rate limit capacity and leak rate as parameters
     fn new(
         socket_address: &str,
         buffer_size: usize
     ) -> io::Result<(Self, SocketAddr)> {
         let udp_socket = UdpSocket::bind(socket_address)?;
         let local_address = udp_socket.local_addr()?;
+        // TODO: Initialize RateLimiter with provided capacity and leak rate
         Ok((
             StunServer { socket: udp_socket, buffer_size: buffer_size },
             local_address
@@ -483,6 +568,7 @@ impl StunServer {
         Ok((bytes_received, remote_peer))
     }
 
+    // TODO: Change to &mut self for rate limiter updates
     fn start(&self) -> io::Result<()> {
         let mut buffer = vec![0u8; self.buffer_size];
 
@@ -490,6 +576,10 @@ impl StunServer {
             println!("Waiting for packet...");
             let (bytes_received, remote_peer) = self.receive_packet(&mut buffer)?;
             println!("Received {} bytes from {}", bytes_received, remote_peer);
+
+            // TODO: Check rate limit for remote_peer.ip() here, before parsing (protects CPU from malicious traffic)
+            // TODO: If rate limited, silently drop packet and continue (RFC 5389 compliance)
+            // TODO: Periodically clean up stale buckets to prevent unbounded memory growth from IP scans
 
             let request = match StunMessage::from_bytes(&buffer[0..bytes_received]) {
                     Ok(msg) => {
@@ -563,9 +653,14 @@ fn main() -> io::Result<()> {
         .and_then(|s| (s.parse()).ok())
         .unwrap_or(2048);
 
+    // TODO: Parse STUN_RATE_LIMIT_CAPACITY env var (default: 20.0 for burst tolerance)
+    // TODO: Parse STUN_RATE_LIMIT_RATE env var (default: 10.0 requests per second)
+
+    // TODO: Pass rate limit params to StunServer::new()
     let (server, local_address) = StunServer::new(&bind_address, buffer_size)?;
 
     println!("Server listening on {}", local_address);
+    // TODO: Make server mutable if start() signature changes to &mut self
     server.start()
 }
 
@@ -706,5 +801,11 @@ mod tests {
 
     #[test]
     fn test_server_returns_420_for_unknown_attribute() {}
+
+    // TODO: Add test_rate_limiter_allows_requests_under_capacity to verify bucket allows bursts up to capacity
+    // TODO: Add test_rate_limiter_drops_requests_over_capacity to verify excess requests are dropped
+    // TODO: Add test_rate_limiter_leaks_over_time to verify bucket drains at leak_rate and allows new requests
+    // TODO: Add test_rate_limiter_isolates_ips to verify different IPs have independent buckets
+    // TODO: Add test_cleanup_removes_stale_buckets to verify memory management
 
 }

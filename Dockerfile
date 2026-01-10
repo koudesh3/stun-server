@@ -25,6 +25,9 @@ EXPOSE 3478/udp
 # Set default environment variables
 ENV STUN_BIND_ADDRESS=0.0.0.0:3478
 ENV STUN_BUFFER_SIZE=2048
+ENV STUN_RATE_LIMIT_CAPACITY=20
+ENV STUN_RATE_LIMIT_RATE=10
+
 
 # Run it!
 CMD ["stun_server"]

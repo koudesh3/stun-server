@@ -59,7 +59,6 @@ impl RateLimiter {
             bucket.increment();
             true
         } else {
-            // TODO: Log error or return 429?
             false
         }
     }
@@ -88,7 +87,7 @@ impl RateLimiter {
 struct StunServer {
     socket: UdpSocket,
     buffer_size: usize,
-    // TODO: Add RateLimiter instance to track request rates per IP
+    rate_limiter: RateLimiter,
 }
 
 // TODO: Implement StunClient struct for use in tests
@@ -546,16 +545,21 @@ impl StunMessage {
 
 impl StunServer {
 
-    // TODO: Accept rate limit capacity and leak rate as parameters
     fn new(
         socket_address: &str,
-        buffer_size: usize
+        buffer_size: usize,
+        bucket_capacity: f64,
+        bucket_leak_rate: f64
     ) -> io::Result<(Self, SocketAddr)> {
-        let udp_socket = UdpSocket::bind(socket_address)?;
-        let local_address = udp_socket.local_addr()?;
-        // TODO: Initialize RateLimiter with provided capacity and leak rate
+        let socket = UdpSocket::bind(socket_address)?;
+        let local_address = socket.local_addr()?;
+        let rate_limiter = RateLimiter::new(bucket_capacity, bucket_leak_rate);
         Ok((
-            StunServer { socket: udp_socket, buffer_size: buffer_size },
+            StunServer {
+                socket,
+                buffer_size,
+                rate_limiter
+            },
             local_address
         ))
     }
@@ -568,8 +572,7 @@ impl StunServer {
         Ok((bytes_received, remote_peer))
     }
 
-    // TODO: Change to &mut self for rate limiter updates
-    fn start(&self) -> io::Result<()> {
+    fn start(&mut self) -> io::Result<()> {
         let mut buffer = vec![0u8; self.buffer_size];
 
         loop {
@@ -577,9 +580,16 @@ impl StunServer {
             let (bytes_received, remote_peer) = self.receive_packet(&mut buffer)?;
             println!("Received {} bytes from {}", bytes_received, remote_peer);
 
-            // TODO: Check rate limit for remote_peer.ip() here, before parsing (protects CPU from malicious traffic)
-            // TODO: If rate limited, silently drop packet and continue (RFC 5389 compliance)
-            // TODO: Periodically clean up stale buckets to prevent unbounded memory growth from IP scans
+            
+            // note: IP is rate limited, silently drop packet and continue
+            if !self.rate_limiter.check_and_update(remote_peer.ip()) {
+                continue;
+            }
+
+            // note: If we haven't cleaned up in 5 mins, then clean up all bucket that haven't been touched in 10 mins
+            if self.rate_limiter.should_cleanup(300) {
+                self.rate_limiter.cleanup_stale_buckets(600);
+            }
 
             let request = match StunMessage::from_bytes(&buffer[0..bytes_received]) {
                     Ok(msg) => {
@@ -653,14 +663,19 @@ fn main() -> io::Result<()> {
         .and_then(|s| (s.parse()).ok())
         .unwrap_or(2048);
 
-    // TODO: Parse STUN_RATE_LIMIT_CAPACITY env var (default: 20.0 for burst tolerance)
-    // TODO: Parse STUN_RATE_LIMIT_RATE env var (default: 10.0 requests per second)
+    let rate_limit_capacity = std::env::var("STUN_RATE_LIMIT_CAPACITY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20.0);
 
-    // TODO: Pass rate limit params to StunServer::new()
-    let (server, local_address) = StunServer::new(&bind_address, buffer_size)?;
+    let rate_limit_rate = std::env::var("STUN_RATE_LIMIT_RATE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10.0);
+
+    let (mut server, local_address) = StunServer::new(&bind_address, buffer_size, rate_limit_capacity, rate_limit_rate)?;
 
     println!("Server listening on {}", local_address);
-    // TODO: Make server mutable if start() signature changes to &mut self
     server.start()
 }
 

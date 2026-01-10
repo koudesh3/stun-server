@@ -3,5 +3,5 @@
 version = 3
 
 [[package]]
-name = "terminal_echo"
+name = "stun_server"
 version = "0.1.0"

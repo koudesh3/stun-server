@@ -1,5 +1,5 @@
 use std::io;
-use terminal_echo::server::StunServer;
+use stun_server::server::StunServer;
 
 fn main() -> io::Result<()> {
     let bind_address = std::env::var("STUN_BIND_ADDRESS")

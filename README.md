@@ -35,3 +35,8 @@ Then you can hit the server with
 ```bash
 stunclient localhost 3478
 ```
+
+This is running in Digital Ocean as of January 2026, so you can run this as long as I have the droplet procured 💦
+```bash
+stunclient 206.189.67.220 3478
+```
